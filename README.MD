@@ -30,8 +30,7 @@
 
 1. 克隆代码仓库：
    ```bash
-   git clone https://github.com/yourusername/material-bandgap-prediction.git
-   cd material-bandgap-prediction
+   git clone https://github.com/kingdol666/MyDeepLearningForMat
    ```
 
 2. 安装依赖项：
@@ -55,7 +54,7 @@
 使用`MaterialDL.py`进行模型训练：
 
 ```bash
-python MaterialDL.py
+python app.py
 ```
 
 该命令会：
@@ -63,20 +62,6 @@ python MaterialDL.py
 2. 进行特征工程与数据预处理
 3. 训练单个深度学习模型或集成模型
 4. 保存训练好的模型和标准化器
-
-### 命令行预测
-
-通过`MaterialPredictor.py`进行命令行预测：
-
-```bash
-python MaterialPredictor.py --elements "Si,O" --nelements 2 --formation_energy -5.23
-```
-
-参数说明：
-- `--elements`: 材料的元素组成，用逗号分隔
-- `--nelements`: 材料中不同元素的数量
-- `--formation_energy`: 材料的形成能(eV/atom)
-- `--use_ensemble`: 是否使用集成模型(可选)
 
 ### Web界面
 
