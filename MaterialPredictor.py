@@ -178,7 +178,8 @@ class MaterialPredictor:
             model = ImprovedMaterialsNet(input_size)
 
             try:
-                model.load_state_dict(torch.load(self.model_file))
+                model.load_state_dict(torch.load(
+                    self.model_file, weights_only=True))
                 print(f"已加载模型，输入特征维度: {input_size}")
             except Exception as e:
                 # 处理模型架构不匹配的情况
@@ -186,7 +187,7 @@ class MaterialPredictor:
                 print("可能是模型架构已更新，尝试使用兼容性加载...")
 
                 # 尝试加载与当前架构不完全匹配的模型
-                state_dict = torch.load(self.model_file)
+                state_dict = torch.load(self.model_file, weights_only=True)
                 model_dict = model.state_dict()
 
                 # 过滤掉不匹配的参数

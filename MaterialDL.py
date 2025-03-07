@@ -180,13 +180,13 @@ class ImprovedMaterialsNet(nn.Module):
         self.backbone = nn.Sequential(
             nn.Linear(input_size, 256),
             nn.BatchNorm1d(256),
-            nn.LeakyReLU(0.2),
-            nn.Dropout(0.3),
+            nn.LeakyReLU(0.1),  # 将斜率从0.2调整到0.1，更平滑的梯度传播
+            nn.Dropout(0.25),   # 轻微降低dropout率，从0.3到0.25
 
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
-            nn.LeakyReLU(0.2),
-            nn.Dropout(0.3),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.25),
         )
 
         # 多分支特征提取
@@ -223,8 +223,9 @@ class ImprovedMaterialsNet(nn.Module):
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
+                # 使用He初始化而非默认初始化
                 nn.init.kaiming_normal_(
-                    m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                    m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm1d):
@@ -255,7 +256,7 @@ class ImprovedMaterialsNet(nn.Module):
 class EnsembleModel:
     """材料带隙预测集成模型，结合多个模型提高预测精度"""
 
-    def __init__(self, input_size, n_models=5):
+    def __init__(self, input_size, n_models=6):  # 从5增加到6
         """初始化集成模型
 
         参数:
@@ -271,7 +272,7 @@ class EnsembleModel:
             model = ImprovedMaterialsNet(input_size)
             self.models.append(model)
 
-    def train(self, train_loader, val_X, val_y, criterion, epochs=200):
+    def train(self, train_loader, val_X, val_y, criterion, epochs=220):  # 增加训练轮数
         """训练集成模型中的每个子模型"""
         print(f"开始训练集成模型 (共{self.n_models}个子模型)...")
 
@@ -284,7 +285,10 @@ class EnsembleModel:
 
             # 为每个模型使用单独的优化器
             optimizer = optim.AdamW(
-                model.parameters(), lr=0.001, weight_decay=5e-4)
+                model.parameters(),
+                lr=0.0015,  # 微调学习率
+                weight_decay=3e-5  # 调整权重衰减
+            )
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode='min', factor=0.5, patience=15)
 
@@ -304,6 +308,8 @@ class EnsembleModel:
                     outputs = model(batch_X)
                     loss = criterion(outputs, batch_y)
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=1.0)
                     optimizer.step()
                     train_loss += loss.item() * batch_X.size(0)
 
@@ -389,7 +395,8 @@ class EnsembleModel:
             for i in range(self.n_models):
                 model_path = os.path.join(directory, f"model_{i}.pth")
                 model = ImprovedMaterialsNet(self.input_size)
-                model.load_state_dict(torch.load(model_path))
+                model.load_state_dict(torch.load(
+                    model_path, weights_only=True))
                 model.eval()  # 设置为评估模式
                 self.models.append(model)
 
@@ -919,7 +926,7 @@ def prepare_features(df):
 # 训练模型
 
 
-def train_model(X, y, feature_names=None, epochs=150):
+def train_model(X, y, feature_names=None, epochs=180):  # 增加训练轮数
     """训练神经网络模型，使用优化的训练策略
 
     参数:
@@ -976,17 +983,26 @@ def train_model(X, y, feature_names=None, epochs=150):
     input_size = X_train_scaled.shape[1]
     model = ImprovedMaterialsNet(input_size)
     criterion = nn.MSELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=0.001,
-                            weight_decay=1e-5)  # 使用AdamW并添加L2正则化
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=0.0012,  # 降低学习率，从0.001到0.0012
+        weight_decay=2e-5,  # 增加权重衰减，从1e-5到2e-5
+        eps=1e-8  # 添加数值稳定性参数
+    )
 
-    # 学习率调度器
+    # 学习率调度器优化
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10)
+        optimizer,
+        mode='min',
+        factor=0.6,  # 从0.5调整到0.6，衰减更温和
+        patience=15,  # 增加耐心值，从10到15
+        min_lr=1e-6  # 设置最小学习率
+    )
 
     # 用于保存最佳模型
     best_val_loss = float('inf')
     best_model_state = None
-    patience = 25  # 早停耐心值
+    patience = 30  # 增加早停耐心值，从25到30
     patience_counter = 0
 
     # 训练循环
@@ -1002,6 +1018,7 @@ def train_model(X, y, feature_names=None, epochs=150):
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             train_loss += loss.item() * batch_X.size(0)
 
@@ -1344,17 +1361,22 @@ def main():
 
         # 组合损失函数
         def combined_loss(pred, target):
+            # 基础MSE损失
             mse = nn.MSELoss()(pred, target)
+
+            # L1损失（MAE），对异常值不敏感
             mae = nn.L1Loss()(pred, target)
-            return mse + 0.1 * mae
+
+            # 调整权重比例
+            return 0.7 * mse + 0.3 * mae  # 从0.1提高MAE的权重到0.3
 
         criterion = combined_loss
 
         # 创建并训练集成模型
         input_size = X_train_scaled.shape[1]
-        ensemble = EnsembleModel(input_size, n_models=5)
+        ensemble = EnsembleModel(input_size, n_models=6)  # 从5增加到6
         ensemble.train(train_loader, X_val_tensor,
-                       y_val_tensor, criterion, epochs=250)
+                       y_val_tensor, criterion, epochs=220)  # 增加训练轮数
 
         # 在测试集上评估集成模型
         print("\n===== 集成模型评估 =====\n")
@@ -1443,4 +1465,3 @@ if __name__ == "__main__":
     else:
         # 无参数则直接运行主程序
         main()
-
