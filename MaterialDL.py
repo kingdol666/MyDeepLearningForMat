@@ -9,9 +9,24 @@ import re
 from mp_api.client import MPRester
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
+import torch.nn.functional as F
 
 # 设置 Materials Project API key
 API_KEY = "aPl7jglRbeUu4oHRPdHtwnsA1F16Wbou"  # 使用您的有效API key
+
+# 检测并设置设备
+
+
+def get_device():
+    """检测是否有可用的GPU并返回相应设备"""
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        print(f"使用GPU: {torch.cuda.get_device_name(0)}")
+        return device
+    else:
+        print("未检测到GPU，使用CPU")
+        return torch.device("cpu")
+
 
 # 定义数据集路径
 DATASET_DIR = "dataset"
@@ -276,8 +291,19 @@ class EnsembleModel:
         """训练集成模型中的每个子模型"""
         print(f"开始训练集成模型 (共{self.n_models}个子模型)...")
 
+        # 获取设备(GPU或CPU)
+        device = get_device()
+
+        # 确保验证数据在正确的设备上
+        val_X = val_X.to(device)
+        val_y = val_y.to(device)
+
         for i, model in enumerate(self.models):
             print(f"\n训练子模型 {i+1}/{self.n_models}")
+
+            # 将模型移动到GPU
+            model = model.to(device)
+            self.models[i] = model
 
             # 为每个模型使用不同的随机种子
             torch.manual_seed(42 + i)
@@ -304,6 +330,10 @@ class EnsembleModel:
 
                 # 批量训练
                 for batch_X, batch_y in train_loader:
+                    # 确保数据在正确的设备上
+                    batch_X = batch_X.to(device)
+                    batch_y = batch_y.to(device)
+
                     optimizer.zero_grad()
                     outputs = model(batch_X)
                     loss = criterion(outputs, batch_y)
@@ -349,23 +379,53 @@ class EnsembleModel:
             print(f"子模型 {i+1} 训练完成，最佳验证损失: {best_val_loss:.6f}")
 
     def predict(self, X):
-        """使用集成模型进行预测"""
+        """使用集成模型进行预测
+
+        参数:
+        - X: 输入特征张量
+
+        返回:
+        - 预测值张量
+        """
+        # 获取当前X所在的设备
+        device = X.device
+
+        # 确保所有模型都在正确的设备上
+        models = [model.to(device) for model in self.models]
+
+        # 进入评估模式
+        for model in models:
+            model.eval()
+
+        # 收集所有模型的预测结果
         with torch.no_grad():
             predictions = []
-            for model in self.models:
-                model.eval()
+            for model in models:
                 pred = model(X)
                 predictions.append(pred)
 
-            # 平均所有模型的预测结果
+            # 计算平均预测值
             ensemble_pred = torch.mean(torch.stack(predictions), dim=0)
-            return ensemble_pred
+
+        return ensemble_pred
 
     def save(self, directory):
-        """保存集成模型的所有子模型"""
-        os.makedirs(directory, exist_ok=True)
+        """保存集成模型的所有子模型
 
+        参数:
+        - directory: 保存模型的目录
+        """
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+        # 保存前将所有模型移动到CPU
         for i, model in enumerate(self.models):
+            # 将模型移到CPU
+            if next(model.parameters()).is_cuda:
+                model = model.cpu()
+                self.models[i] = model
+
+            # 保存模型
             model_path = os.path.join(directory, f"model_{i}.pth")
             torch.save(model.state_dict(), model_path)
 
@@ -944,6 +1004,9 @@ def train_model(X, y, feature_names=None, epochs=180):  # 增加训练轮数
     if feature_names:
         print(f"使用特征: {feature_names}")
 
+    # 获取设备(GPU或CPU)
+    device = get_device()
+
     # 划分训练集、验证集和测试集
     X_temp, X_test, y_temp, y_test = train_test_split(
         X, y, test_size=0.1, random_state=42)
@@ -964,13 +1027,13 @@ def train_model(X, y, feature_names=None, epochs=180):  # 增加训练轮数
     if not save_result:
         print("警告: 保存标准化器参数失败，继续进行模型训练...")
 
-    # 转换为张量
-    X_train_tensor = torch.FloatTensor(X_train_scaled)
-    y_train_tensor = torch.FloatTensor(y_train.reshape(-1, 1))
-    X_val_tensor = torch.FloatTensor(X_val_scaled)
-    y_val_tensor = torch.FloatTensor(y_val.reshape(-1, 1))
-    X_test_tensor = torch.FloatTensor(X_test_scaled)
-    y_test_tensor = torch.FloatTensor(y_test.reshape(-1, 1))
+    # 转换为张量并移动到指定设备上
+    X_train_tensor = torch.FloatTensor(X_train_scaled).to(device)
+    y_train_tensor = torch.FloatTensor(y_train.reshape(-1, 1)).to(device)
+    X_val_tensor = torch.FloatTensor(X_val_scaled).to(device)
+    y_val_tensor = torch.FloatTensor(y_val.reshape(-1, 1)).to(device)
+    X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
+    y_test_tensor = torch.FloatTensor(y_test.reshape(-1, 1)).to(device)
 
     # 创建数据加载器，使用小批量训练
     batch_size = min(64, len(X_train))
@@ -981,7 +1044,7 @@ def train_model(X, y, feature_names=None, epochs=180):  # 增加训练轮数
 
     # 初始化模型、损失函数和优化器
     input_size = X_train_scaled.shape[1]
-    model = ImprovedMaterialsNet(input_size)
+    model = ImprovedMaterialsNet(input_size).to(device)  # 移动模型到GPU
     criterion = nn.MSELoss()
     optimizer = optim.AdamW(
         model.parameters(),
@@ -1014,6 +1077,10 @@ def train_model(X, y, feature_names=None, epochs=180):  # 增加训练轮数
 
         # 使用批量训练
         for batch_X, batch_y in train_loader:
+            # 确保数据在正确的设备上
+            batch_X = batch_X.to(device)
+            batch_y = batch_y.to(device)
+
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
@@ -1074,6 +1141,11 @@ def train_model(X, y, feature_names=None, epochs=180):  # 增加训练轮数
         print(f"MSE: {test_loss:.6f}")
         print(f"MAE: {mae:.6f}")
         print(f"R²: {r2:.6f}")
+
+    # 在加载最佳模型状态后移动回CPU，便于保存和后续使用
+    if torch.cuda.is_available():
+        model = model.cpu()
+        print("模型已从GPU移到CPU，以便保存和预测")
 
     # 保存模型
     try:
@@ -1344,13 +1416,16 @@ def main():
             'feature_names': feature_names} if feature_names else None
         save_scaler(scaler, SCALER_FILE, feature_info)
 
-        # 转换为张量
-        X_train_tensor = torch.FloatTensor(X_train_scaled)
-        y_train_tensor = torch.FloatTensor(y_train.reshape(-1, 1))
-        X_val_tensor = torch.FloatTensor(X_val_scaled)
-        y_val_tensor = torch.FloatTensor(y_val.reshape(-1, 1))
-        X_test_tensor = torch.FloatTensor(X_test_scaled)
-        y_test_tensor = torch.FloatTensor(y_test.reshape(-1, 1))
+        # 获取设备(GPU或CPU)
+        device = get_device()
+
+        # 转换为张量并移至设备
+        X_train_tensor = torch.FloatTensor(X_train_scaled).to(device)
+        y_train_tensor = torch.FloatTensor(y_train.reshape(-1, 1)).to(device)
+        X_val_tensor = torch.FloatTensor(X_val_scaled).to(device)
+        y_val_tensor = torch.FloatTensor(y_val.reshape(-1, 1)).to(device)
+        X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
+        y_test_tensor = torch.FloatTensor(y_test.reshape(-1, 1)).to(device)
 
         # 创建数据加载器
         batch_size = min(64, len(X_train))
@@ -1361,6 +1436,9 @@ def main():
 
         # 组合损失函数
         def combined_loss(pred, target):
+            # 获取设备
+            device = pred.device
+
             # 基础MSE损失
             mse = nn.MSELoss()(pred, target)
 
@@ -1384,9 +1462,8 @@ def main():
 
         # 计算评估指标
         from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-        test_pred = ensemble_pred.numpy().flatten()
-        test_true = y_test.flatten()
-
+        test_pred = ensemble_pred.cpu().numpy().flatten()
+        test_true = y_test_tensor.cpu().numpy().flatten()
         test_mse = mean_squared_error(test_true, test_pred)
         rmse = np.sqrt(test_mse)
         mae = mean_absolute_error(test_true, test_pred)
@@ -1465,3 +1542,20 @@ if __name__ == "__main__":
     else:
         # 无参数则直接运行主程序
         main()
+
+
+def to_cpu(tensor_or_model):
+    """将张量或模型从GPU移动到CPU
+
+    参数:
+        tensor_or_model: 张量或PyTorch模型
+
+    返回:
+        移动到CPU的张量或模型
+    """
+    if torch.cuda.is_available():
+        if hasattr(tensor_or_model, 'cpu'):
+            return tensor_or_model.cpu()
+        elif hasattr(tensor_or_model, 'to'):
+            return tensor_or_model.to('cpu')
+    return tensor_or_model
