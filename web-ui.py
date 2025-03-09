@@ -74,7 +74,12 @@ def predict_material(elements, nelements, formation_energy, use_ensemble=False):
         details += f"元素数量: {nelements}\n"
         details += f"形成能: {formation_energy:.4f} eV/atom\n"
         details += f"预测带隙: {band_gap:.4f} eV\n"
-        details += f"材料类型: {material_class}"
+        details += f"材料类型: {material_class}\n"
+        details += f"使用模型: {'集成模型' if use_ensemble else '单一模型'}"
+
+        # 更新可视化指示器
+        # 注意：这部分代码不会直接影响返回值，但在实际应用中可以通过JavaScript更新UI
+        # 这里只是为了保持代码完整性
 
         # 返回结果列表
         return f"{band_gap:.4f} eV", material_class, details
@@ -365,13 +370,13 @@ def generate_test_data(use_ensemble=False, force_regenerate=False):
         # 加载数据
         materials_df = pd.read_csv(data_file, encoding='utf-8')
 
-        # 取一部分数据作为测试集 (随机30个样本)
+        # 取一部分数据作为测试集 (随机60个样本)
         # 对于强制重新生成，使用不同的随机种子以获得不同样本
         random_seed = 42 if not force_regenerate else int(time.time()) % 1000
         np.random.seed(random_seed)
         print(f"使用随机种子 {random_seed} 生成测试样本")
         test_indices = np.random.choice(
-            len(materials_df), min(30, len(materials_df)), replace=False)
+            len(materials_df), min(60, len(materials_df)), replace=False)
         test_df = materials_df.iloc[test_indices].copy()
 
         print(f"初始化{model_type_str}模型预测器...")
@@ -443,57 +448,192 @@ def clear_test_data(model_type_str):
     except Exception as e:
         return f"<div style='color:red; padding:10px; background:#f4e8e8; border-radius:5px;'>❌ 清除数据时出错: {str(e)}</div>"
 
+# 批量预测函数
+def batch_predict(file_path, use_ensemble=True):
+    """批量预测材料带隙
+    
+    Args:
+        file_path (str): 上传的CSV文件路径
+        use_ensemble (bool): 是否使用集成模型
+        
+    Returns:
+        tuple: (DataFrame, str) - 预测结果数据框和状态信息HTML
+    """
+    try:
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            return None, f"<div style='color:red; padding:10px; background:#f4e8e8; border-radius:5px;'>❌ 文件不存在</div>"
+        
+        # 检查文件扩展名
+        if not file_path.lower().endswith('.csv'):
+            return None, f"<div style='color:red; padding:10px; background:#f4e8e8; border-radius:5px;'>❌ 请上传CSV格式文件</div>"
+        
+        # 读取CSV文件
+        try:
+            df = pd.read_csv(file_path, encoding='utf-8')
+        except Exception as e:
+            return None, f"<div style='color:red; padding:10px; background:#f4e8e8; border-radius:5px;'>❌ 读取CSV文件失败: {str(e)}</div>"
+        
+        # 检查必要的列是否存在
+        required_columns = ['elements', 'nelements', 'formation_energy']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            return None, f"<div style='color:red; padding:10px; background:#f4e8e8; border-radius:5px;'>❌ CSV文件缺少必要的列: {', '.join(missing_columns)}</div>"
+        
+        # 初始化预测器
+        predictor = MaterialPredictor(use_ensemble=use_ensemble)
+        
+        # 检查模型是否正确加载
+        if predictor.model is None:
+            return None, f"<div style='color:red; padding:10px; background:#f4e8e8; border-radius:5px;'>❌ 模型未正确加载，请检查模型文件是否存在</div>"
+        
+        # 准备结果列表
+        results = []
+        errors = []
+        
+        # 对每一行数据进行预测
+        for idx, row in df.iterrows():
+            try:
+                # 确保元素是字符串类型，并去除可能的引号
+                elements = str(row['elements']).strip('"\'')
+                nelements = int(row['nelements'])
+                formation_energy = float(row['formation_energy'])
+                
+                # 预测带隙
+                band_gap = predictor.predict(nelements, formation_energy, elements)
+                
+                if band_gap is None:
+                    errors.append(f"行 {idx+1}: 预测失败")
+                    band_gap = 0.0
+                
+                # 根据带隙值进行材料分类
+                material_class = classify_material(band_gap)
+                
+                # 添加结果
+                results.append({
+                    'elements': elements,
+                    'nelements': nelements,
+                    'formation_energy': formation_energy,
+                    'predicted_band_gap': band_gap,
+                    'material_class': material_class
+                })
+            except Exception as e:
+                errors.append(f"行 {idx+1}: {str(e)}")
+        
+        # 创建结果DataFrame
+        results_df = pd.DataFrame(results)
+        
+        # 生成状态信息
+        if errors:
+            status_html = f"<div style='color:orange; padding:10px; background:#fff9e6; border-radius:5px;'>⚠️ 批量预测完成，但有 {len(errors)} 个错误:<br>" + "<br>".join(errors) + "</div>"
+        else:
+            status_html = f"<div style='color:green; padding:10px; background:#e8f4e8; border-radius:5px;'>✅ 批量预测成功，共处理 {len(results)} 条数据</div>"
+        
+        return results_df, status_html
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return None, f"<div style='color:red; padding:10px; background:#f4e8e8; border-radius:5px;'>❌ 批量预测过程中发生错误: {str(e)}</div>"
+
+# 生成下载链接函数
+def download_batch_results(results_df):
+    """生成批量预测结果的下载链接
+    
+    Args:
+        results_df (DataFrame): 预测结果数据框
+        
+    Returns:
+        str: 下载链接
+    """
+    if results_df is None or len(results_df) == 0:
+        return None
+    
+    try:
+        # 创建临时文件
+        temp_file = os.path.join(os.getcwd(), "temp_batch_results.csv")
+        
+        # 复制DataFrame以避免修改原始数据
+        export_df = results_df.copy()
+        
+        # 确保元素列的值被引号包围
+        if 'elements' in export_df.columns:
+            export_df['elements'] = export_df['elements'].apply(lambda x: f'"{x}"' if not str(x).startswith('"') else x)
+        
+        # 保存结果到临时文件
+        export_df.to_csv(temp_file, index=False, encoding='utf-8', quoting=1)  # quoting=1 表示为非数值列添加引号
+        
+        # 读取文件内容
+        with open(temp_file, 'rb') as f:
+            content = f.read()
+        
+        # 删除临时文件
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        
+        # 编码文件内容
+        b64_content = base64.b64encode(content).decode('utf-8')
+        
+        # 生成下载链接
+        download_link = f"data:text/csv;base64,{b64_content}"
+        
+        return download_link
+    
+    except Exception as e:
+        print(f"生成下载链接时出错: {str(e)}")
+        return None
+
+# 生成示例CSV文件下载链接
+def get_example_csv():
+    """生成示例CSV文件的下载链接
+    
+    Returns:
+        str: 下载链接HTML
+    """
+    try:
+        # 示例CSV内容
+        csv_content = """elements,nelements,formation_energy
+"Si,O",2,-4.5
+"Fe,O",2,-3.2
+"Al,O",2,-5.1
+"Cu,Zn,Sn,S",4,-0.55
+"Ti,O",2,-4.78"""
+        
+        # 编码文件内容
+        b64_content = base64.b64encode(csv_content.encode('utf-8')).decode('utf-8')
+        
+        # 生成下载链接
+        download_html = f"""
+        <a href="data:text/csv;base64,{b64_content}" download="example_materials.csv" 
+           style="display: block; text-align: center; padding: 10px; background-color: #f0f9ff; 
+                  border-radius: 5px; text-decoration: none; color: #2563eb; font-weight: 500;">
+            ⬇️ 点击此处下载示例CSV文件
+        </a>
+        """
+        
+        return download_html
+    
+    except Exception as e:
+        print(f"生成示例CSV下载链接时出错: {str(e)}")
+        return "<div style='color:red;'>生成示例文件失败</div>"
+
 # 创建Gradio界面
 
 
 def create_interface():
     # 检查模型文件
     model_status = check_model_files()
-
-    # 简单的CSS样式
-    css = """
-    h1 {
-        text-align: center;
-        color: #2C3E50;
-        margin-bottom: 0.5em;
-        background: linear-gradient(90deg, #3498DB, #2980B9);
-        padding: 10px;
-        border-radius: 8px;
-        color: white;
-    }
-    h2, h3 {
-        color: #2C3E50;
-        border-left: 4px solid #3498DB;
-        padding-left: 8px;
-    }
-    .footer {
-        text-align: center;
-        margin-top: 30px;
-        padding-top: 10px;
-        border-top: 1px solid #eee;
-        color: #7F8C8D;
-        font-size: 0.9em;
-    }
-    .gradio-button {
-        background-color: #3498DB !important;
-    }
-    .model-status {
-        background-color: #EBF5FB;
-        padding: 10px;
-        border-radius: 5px;
-        border-left: 4px solid #3498DB;
-    }
-    .img-container img {
-        max-width: 100%;
-        border-radius: 5px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    """
+    
 
     # 定义输入组件
-    with gr.Blocks(title="材料带隙预测系统", css=css) as demo:
-        gr.HTML('<h1>🔬 材料带隙预测系统</h1>')
-        gr.Markdown("<p style='text-align:center'>基于深度学习的无机材料带隙预测工具</p>")
+    with gr.Blocks(title="材料带隙预测系统", ) as demo:
+        with gr.Row(elem_classes=["header-container"]):
+            gr.HTML("""
+            <div class="header">
+                <h1>🔬 材料带隙预测系统</h1>
+                <p class="subtitle">基于深度学习的无机材料带隙预测工具</p>
+            </div>
+            """)
 
         # 模型状态信息
         with gr.Column():
@@ -503,125 +643,295 @@ def create_interface():
             formatted_status = formatted_status.replace("ℹ️", "ℹ️ ")
             formatted_status = formatted_status.replace("\n", "<br>")
             gr.HTML(
-                f"<div class='model-status'><h3>系统状态</h3>{formatted_status}</div>")
+                f"""<div class='model-status'>
+                    <div class="status-icon">📊</div>
+                    <div class="status-content">
+                        <h3>系统状态</h3>
+                        {formatted_status}
+                    </div>
+                </div>"""
+            )
 
         with gr.Tabs():
             with gr.Tab("🔍 单材料预测"):
                 with gr.Row():
-                    with gr.Column():
+                    with gr.Column(scale=3):
                         # 输入组件
                         gr.Markdown("### 输入参数")
-
-                        elements_input = gr.Textbox(
-                            label="元素组成",
-                            placeholder="输入元素符号，用逗号分隔 (例如: Si,O)"
-                        )
-
-                        with gr.Row():
-                            nelements_input = gr.Number(
-                                label="元素数量",
-                                value=2,
-                                minimum=1,
-                                maximum=10,
-                                step=1
+                        
+                        with gr.Group(elem_classes=["input-card"]):
+                            elements_input = gr.Textbox(
+                                label="元素组成",
+                                placeholder="输入元素符号，用逗号分隔 (例如: Si,O)"
                             )
+                            
+                            with gr.Row():
+                                with gr.Column(scale=1):
+                                    nelements_input = gr.Number(
+                                        label="元素数量",
+                                        value=2,
+                                        minimum=1,
+                                        maximum=10,
+                                        step=1
+                                    )
+                                
+                                with gr.Column(scale=1):
+                                    formation_energy_input = gr.Number(
+                                        label="形成能 (eV/atom)",
+                                        value=-3.0,
+                                        minimum=-10,
+                                        maximum=10
+                                    )
+                            
+                            with gr.Row():
+                                use_ensemble = gr.Checkbox(
+                                    label="使用集成模型 (通常更准确)",
+                                    value=False
+                                )
+                                
+                                predict_btn = gr.Button(
+                                    "🔮 预测带隙", 
+                                    variant="primary",
+                                    elem_id="predict-btn"
+                                )
+                            
+                            # 添加元素周期表参考
+                            with gr.Accordion("元素周期表参考", open=False):
+                                gr.HTML("""
+                                <div style="text-align: center;">
+                                    <img src="https://sciencenotes.org/wp-content/uploads/2020/06/PeriodicTableCharge.png" 
+                                         alt="元素周期表" 
+                                         style="max-width: 100%; border-radius: 8px; margin-top: 10px;">
+                                    <p style="font-size: 0.8rem; color: #666; margin-top: 5px;">
+                                        点击查看元素周期表，帮助输入正确的元素符号
+                                    </p>
+                                </div>
+                                """)
 
-                            formation_energy_input = gr.Number(
-                                label="形成能 (eV/atom)",
-                                value=-3.0,
-                                minimum=-10,
-                                maximum=10
-                            )
-
-                        use_ensemble = gr.Checkbox(
-                            label="使用集成模型 (如果可用)",
-                            value=False
-                        )
-
-                        predict_btn = gr.Button("🔮 预测带隙", variant="primary")
-
-                    with gr.Column():
+                    with gr.Column(scale=2):
                         # 输出组件
                         gr.Markdown("### 预测结果")
-
-                        band_gap_output = gr.Textbox(label="预测带隙")
-                        material_class_output = gr.Textbox(label="材料分类")
-                        details_output = gr.Textbox(label="详细信息", lines=6)
+                        
+                        with gr.Group(elem_classes=["result-card"]):
+                            # 添加结果状态指示器
+                            result_status = gr.HTML(
+                                """<div style="text-align: center; padding: 20px;">
+                                    <p style="color: #666;">点击"预测带隙"按钮获取结果</p>
+                                </div>""",
+                                elem_id="result-status"
+                            )
+                            
+                            band_gap_output = gr.Textbox(
+                                label="预测带隙",
+                                elem_id="band-gap-output"
+                            )
+                            
+                            material_class_output = gr.Textbox(
+                                label="材料分类",
+                                elem_id="material-class-output"
+                            )
+                            
+                            details_output = gr.Textbox(
+                                label="详细信息", 
+                                lines=6,
+                                elem_id="details-output"
+                            )
+                            
+                            # 添加可视化指示器
+                            with gr.Row(visible=False, elem_classes=["visualization-row"]) as visualization_row:
+                                gr.HTML("""
+                                <div style="text-align: center; width: 100%;">
+                                    <div style="display: inline-block; width: 100%; max-width: 300px; height: 30px; background: linear-gradient(to right, #3498db, #2ecc71, #f1c40f, #e74c3c); border-radius: 15px; position: relative; margin-top: 10px;">
+                                        <div id="band-gap-indicator" style="position: absolute; top: -10px; left: 50%; transform: translateX(-50%);">
+                                            <div style="width: 20px; height: 20px; background-color: #333; border-radius: 50%; border: 3px solid white;"></div>
+                                            <div style="color: #333; font-weight: bold; margin-top: 5px;">2.5 eV</div>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; padding: 0 10px; margin-top: 35px; font-size: 0.8rem;">
+                                            <span>金属</span>
+                                            <span>半导体</span>
+                                            <span>绝缘体</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                """)
 
                 # 样本数据
-                gr.Markdown("### 示例材料")
-                gr.Markdown("点击下方示例快速测试预测功能:")
+                with gr.Row():
+                    gr.Markdown("### 示例材料")
+                    gr.Markdown("点击下方示例快速测试预测功能:")
 
                 sample_data = generate_samples()
                 gr.Examples(
                     examples=sample_data,
-                    inputs=[elements_input, nelements_input,
-                            formation_energy_input],
-                    outputs=[band_gap_output,
-                             material_class_output, details_output],
+                    inputs=[elements_input, nelements_input, formation_energy_input],
+                    outputs=[band_gap_output, material_class_output, details_output],
                     fn=lambda e, n, f: predict_material(e, n, f, False)
                 )
 
             with gr.Tab("📊 批量预测"):
                 with gr.Column():
-                    gr.Markdown("### 批量预测功能 (开发中)")
-
-                    file_input = gr.File(
-                        label="上传CSV文件 (功能开发中)",
-                        file_types=[".csv"]
-                    )
-
-                    gr.Markdown("""
-                    #### 批量预测说明
-                    未来版本将支持上传CSV文件进行批量预测。CSV文件应包含以下列：
-                    - `elements`: 元素组成，用逗号分隔
-                    - `nelements`: 元素数量
-                    - `formation_energy`: 形成能 (eV/atom)
+                    gr.Markdown("### 批量预测功能")
                     
-                    预测结果将以CSV文件形式返回，包含原始数据和预测的带隙值。
-                    """)
-
-                    batch_predict_btn = gr.Button(
-                        "批量预测 (即将推出)", interactive=False)
+                    with gr.Group(elem_classes=["batch-card"]):
+                        with gr.Row():
+                            with gr.Column(scale=3):
+                                file_input = gr.File(
+                                    label="上传CSV文件",
+                                    file_types=[".csv"]
+                                )
+                            
+                            with gr.Column(scale=1, min_width=200):
+                                batch_use_ensemble = gr.Checkbox(
+                                    label="使用集成模型",
+                                    value=True
+                                )
+                                
+                                batch_predict_btn = gr.Button(
+                                    "批量预测", 
+                                    variant="primary",
+                                    interactive=True
+                                )
+                        
+                        # 添加状态信息区域
+                        batch_status = gr.HTML(
+                            """<div style="text-align: center; padding: 10px;">
+                                <p style="color: #666;">上传CSV文件并点击"批量预测"按钮开始处理</p>
+                            </div>""",
+                            label="处理状态"
+                        )
+                    
+                    # 添加结果显示区域
+                    with gr.Group(elem_classes=["batch-results-card"], visible=False) as batch_results_container:
+                        gr.Markdown("### 预测结果")
+                        
+                        with gr.Row():
+                            batch_results = gr.DataFrame(
+                                label="批量预测结果",
+                                interactive=False
+                            )
+                        
+                        with gr.Row():
+                            download_btn = gr.Button(
+                                "📥 下载结果", 
+                                variant="secondary"
+                            )
+                            
+                            download_link = gr.HTML(visible=False)
+                    
+                    with gr.Accordion("CSV文件格式说明", open=True):
+                        gr.Markdown("""
+                        #### CSV文件格式要求
+                        上传的CSV文件必须包含以下列：
+                        
+                        | 列名 | 描述 | 示例 |
+                        |------|------|------|
+                        | `elements` | 元素组成（用空格分隔，整体用引号包围） | `"Si O"` |
+                        | `nelements` | 元素数量 | `2` |
+                        | `formation_energy` | 形成能 (eV/atom) | `-3.0` |
+                        
+                        #### 示例CSV内容
+                        """)
+                        
+                        # 添加示例CSV内容
+                        gr.Code(
+                            """elements,nelements,formation_energy
+"Si,O",2,-4.5
+"Fe,O",2,-3.2
+"Al,O",2,-5.1
+"Cu,Zn Sn S",4,-0.55
+"Ti,O",2,-4.78""", 
+                            language="markdown"
+                        )
+                        
+                        gr.Markdown("""
+                        #### 注意事项
+                        - 确保CSV文件使用UTF-8编码
+                        - 确保元素符号正确（例如：Fe而不是FE）
+                        - 确保数值列（nelements和formation_energy）包含有效的数字
+                        - 每行数据将单独进行预测，预测结果将包含预测的带隙值和材料分类
+                        """)
+                        
+                        # 添加下载示例按钮
+                        with gr.Row():
+                            download_example_btn = gr.Button("下载示例CSV文件")
+                            example_download_link = gr.HTML(visible=False)
 
             # 新增拟合曲线选项卡
             with gr.Tab("📈 模型性能评估"):
                 with gr.Column():
                     gr.Markdown("### 模型预测性能评估")
-                    gr.Markdown("分析实际带隙值与预测带隙值的拟合情况，评估模型性能。")
-
-                    with gr.Row():
-                        # 选择使用哪种模型
-                        model_type = gr.Radio(
-                            label="选择评估的模型类型",
-                            choices=["单一模型", "集成模型"],
-                            value="单一模型"
+                    
+                    with gr.Group(elem_classes=["performance-card"]):
+                        gr.Markdown("""
+                        本页面展示模型在预测材料带隙时的性能表现。通过比较实际带隙值与预测带隙值，
+                        可以评估模型的准确性和可靠性。您可以选择单一模型或集成模型进行评估。
+                        """)
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2, min_width=250):
+                                # 选择使用哪种模型
+                                model_type = gr.Radio(
+                                    label="选择评估的模型类型",
+                                    choices=["单一模型", "集成模型"],
+                                    value="单一模型",
+                                    interactive=True,
+                                    elem_classes=["model-type-selector"]
+                                )
+                            
+                            with gr.Column(scale=1, min_width=200):
+                                # 添加重新生成数据的选项
+                                regenerate_data = gr.Checkbox(
+                                    label="重新生成测试数据",
+                                    value=False,
+                                    info="选中此项将强制重新生成测试数据，会覆盖现有结果",
+                                    elem_classes=["regenerate-checkbox"]
+                                )
+                        
+                        with gr.Row():
+                            # 生成拟合曲线按钮
+                            plot_btn = gr.Button(
+                                "📊 生成拟合曲线", 
+                                variant="primary", 
+                                elem_id="plot-btn",
+                                scale=3,
+                                min_width=200
+                            )
+                            
+                            # 清除测试数据按钮
+                            clear_btn = gr.Button(
+                                "🗑️ 清除测试数据", 
+                                variant="secondary", 
+                                elem_id="clear-btn",
+                                scale=1,
+                                min_width=150
+                            )
+                        
+                        # 显示处理状态信息
+                        status_output = gr.HTML(
+                            """<div style="text-align: center; padding: 10px; margin-top: 10px;">
+                                <p style="color: #666;">点击"生成拟合曲线"按钮查看模型性能</p>
+                            </div>""",
+                            label="状态信息",
+                            elem_id="plot-status",
+                            elem_classes=["status-output"]
                         )
-
-                        # 添加重新生成数据的选项
-                        regenerate_data = gr.Checkbox(
-                            label="重新生成测试数据",
-                            value=False,
-                            info="选中此项将强制重新生成测试数据，会覆盖现有结果"
-                        )
-
-                    with gr.Row():
-                        # 生成拟合曲线按钮
-                        plot_btn = gr.Button(
-                            "生成拟合曲线", variant="primary", scale=3)
-
-                        # 清除测试数据按钮
-                        clear_btn = gr.Button(
-                            "清除测试数据", variant="secondary", scale=1)
-
-                    # 显示处理状态信息
-                    status_output = gr.HTML(label="状态信息")
-
-                    # 显示拟合曲线图像
-                    with gr.Column():
-                        plot_output = gr.HTML(label="拟合曲线")
-                        stats_output = gr.HTML(label="性能统计")
-
+                    
+                    # 显示拟合曲线和统计信息
+                    with gr.Row(equal_height=True):
+                        with gr.Column(scale=3, min_width=400):
+                            with gr.Group(elem_classes=["plot-container"]):
+                                plot_output = gr.HTML(
+                                    label="拟合曲线",
+                                    elem_classes=["plot-output"]
+                                )
+                        
+                        with gr.Column(scale=2, min_width=300):
+                            with gr.Group(elem_classes=["stats-container"]):
+                                stats_output = gr.HTML(
+                                    label="性能统计",
+                                    elem_classes=["stats-output"]
+                                )
+                    
                     # 解释
                     with gr.Accordion("图表说明", open=False):
                         gr.Markdown("""
@@ -639,53 +949,119 @@ def create_interface():
                         - 集成模型通常比单一模型表现更好，尤其在复杂材料上
                         - 如果某种类型的材料点远离拟合线，可能表明模型对该类材料预测不佳
                         """)
-
+                    
                     # 添加数据点详情
                     with gr.Accordion("测试数据详情", open=False):
-                        data_details = gr.DataFrame(
-                            headers=["材料成分", "元素数量", "形成能",
-                                     "实际带隙", "预测带隙", "绝对误差"],
-                            type="pandas"
-                        )
+                        with gr.Group(elem_classes=["data-details-container"]):
+                            data_details = gr.DataFrame(
+                                headers=["材料成分", "元素数量", "形成能",
+                                         "实际带隙", "预测带隙", "绝对误差"],
+                                type="pandas",
+                                elem_classes=["data-details-table"],
+                                wrap=True
+                            )
 
             with gr.Tab("ℹ️ 使用说明"):
-                gr.Markdown("""
-                ### 使用指南
-                
-                #### 基本操作
-                1. 在"单材料预测"选项卡中输入材料信息
-                2. 点击"预测带隙"按钮获取结果
-                3. 结果将显示预测的带隙值、材料分类和详细信息
-                
-                #### 输入参数说明
-                - **元素组成**: 输入构成材料的元素符号，用逗号分隔（例如：Si,O 表示二氧化硅）
-                - **元素数量**: 材料中不同元素的数量
-                - **形成能**: 材料的形成能，单位为eV/atom
-                - **使用集成模型**: 如果可用，使用多个模型的集成进行预测，通常可提高准确性
-                
-                #### 材料分类标准
-                - 🔵 **金属/导体**: 带隙 < 0.1 eV
-                - 🟢 **半导体**: 带隙 0.1-3.0 eV
-                - 🟠 **绝缘体**: 带隙 > 3.0 eV
-                
-                #### 注意事项
-                - 确保输入的元素符号正确（例如：Fe而不是FE）
-                - 形成能通常为负值，表示材料的稳定性
-                - 如果预测结果不准确，可尝试使用集成模型
-                
-                #### 模型性能评估
-                - 使用"模型性能评估"选项卡可查看模型预测的准确性
-                - 拟合曲线显示了预测值与实际值的对比
-                - R²值越接近1，表示模型预测性能越好
-                """)
-
-        # 版本信息
-        gr.HTML("""
-        <div class="footer">
-            <p>材料带隙预测系统 v1.1 | 基于深度学习的材料科学工具</p>
-            <p>© 2025 张昊峥测试项目</p>
-        </div>
-        """)
+                with gr.Group(elem_classes=["guide-container"]):
+                    gr.Markdown("""
+                    # 使用指南
+                    
+                    ## 基本操作
+                    1. 在"单材料预测"选项卡中输入材料信息
+                    2. 点击"预测带隙"按钮获取结果
+                    3. 结果将显示预测的带隙值、材料分类和详细信息
+                    
+                    ## 输入参数说明
+                    
+                    | 参数 | 说明 | 示例 |
+                    |------|------|------|
+                    | **元素组成** | 输入构成材料的元素符号，用逗号分隔 | `Si,O` 表示二氧化硅 |
+                    | **元素数量** | 材料中不同元素的数量 | `2` (对于SiO₂) |
+                    | **形成能** | 材料的形成能，单位为eV/atom | `-3.0` |
+                    | **使用集成模型** | 如果可用，使用多个模型的集成进行预测，通常可提高准确性 | - |
+                    
+                    ## 材料分类标准
+                    
+                    <div style="display: flex; justify-content: space-between; margin: 20px 0;">
+                        <div style="text-align: center; padding: 15px; background-color: #e6f7ff; border-radius: 8px; width: 30%;">
+                            <div style="font-size: 24px; margin-bottom: 10px;">🔵</div>
+                            <div style="font-weight: bold;">金属/导体</div>
+                            <div>带隙 < 0.1 eV</div>
+                        </div>
+                        <div style="text-align: center; padding: 15px; background-color: #e6ffed; border-radius: 8px; width: 30%;">
+                            <div style="font-size: 24px; margin-bottom: 10px;">🟢</div>
+                            <div style="font-weight: bold;">半导体</div>
+                            <div>带隙 0.1-3.0 eV</div>
+                        </div>
+                        <div style="text-align: center; padding: 15px; background-color: #fff7e6; border-radius: 8px; width: 30%;">
+                            <div style="font-size: 24px; margin-bottom: 10px;">🟠</div>
+                            <div style="font-weight: bold;">绝缘体</div>
+                            <div>带隙 > 3.0 eV</div>
+                        </div>
+                    </div>
+                    
+                    ## 注意事项
+                    - 确保输入的元素符号正确（例如：Fe而不是FE）
+                    - 形成能通常为负值，表示材料的稳定性
+                    - 如果预测结果不准确，可尝试使用集成模型
+                    
+                    ## 模型性能评估
+                    - 使用"模型性能评估"选项卡可查看模型预测的准确性
+                    - 拟合曲线显示了预测值与实际值的对比
+                    - R²值越接近1，表示模型预测性能越好
+                    """)
+                    
+                    # 添加常见问题解答
+                    with gr.Accordion("常见问题解答", open=False):
+                        gr.Markdown("""
+                        ### 常见问题解答
+                        
+                        #### Q: 如何获取材料的形成能数据？
+                        A: 形成能数据可以从Materials Project、OQMD等材料数据库获取，也可以通过第一性原理计算获得。
+                        
+                        #### Q: 预测结果的准确性如何？
+                        A: 模型的准确性取决于训练数据的质量和数量。对于常见材料，预测误差通常在0.3-0.5 eV范围内。集成模型通常比单一模型更准确。
+                        
+                        #### Q: 为什么有些材料的预测结果不准确？
+                        A: 以下因素可能导致预测不准确：
+                        - 材料结构复杂或罕见，训练数据中缺少类似样本
+                        - 输入参数不准确
+                        - 材料存在特殊电子结构，如强关联效应
+                        
+                        #### Q: 如何提高预测准确性？
+                        A: 尝试以下方法：
+                        - 使用集成模型进行预测
+                        - 确保输入参数准确
+                        - 对于复杂材料，考虑使用更专业的计算方法
+                        """)
+                        
+                    # 添加参考文献
+                    with gr.Accordion("参考文献", open=False):
+                        gr.Markdown("""
+                        ### 参考文献
+                        
+                        1. Ward, L., Agrawal, A., Choudhary, A., & Wolverton, C. (2016). A general-purpose machine learning framework for predicting properties of inorganic materials. *npj Computational Materials*, 2, 16028.
+                        
+                        2. Jain, A., Ong, S. P., Hautier, G., Chen, W., Richards, W. D., Dacek, S., ... & Persson, K. A. (2013). Commentary: The Materials Project: A materials genome approach to accelerating materials innovation. *APL Materials*, 1(1), 011002.
+                        
+                        3. Isayev, O., Oses, C., Toher, C., Gossett, E., Curtarolo, S., & Tropsha, A. (2017). Universal fragment descriptors for predicting properties of inorganic crystals. *Nature Communications*, 8, 15679.
+                        """)
+                        
+                    # 添加版本历史
+                    with gr.Accordion("版本历史", open=False):
+                        gr.Markdown("""
+                        ### 版本历史
+                        
+                        #### v1.1 (当前版本)
+                        - 改进用户界面
+                        - 添加模型性能评估功能
+                        - 优化预测算法
+                        
+                        #### v1.0
+                        - 初始版本
+                        - 基本预测功能
+                        - 单一模型支持
+                        """)
 
         # 设置提交函数 - 保持原功能不变
         predict_btn.click(
@@ -693,6 +1069,45 @@ def create_interface():
             inputs=[elements_input, nelements_input,
                     formation_energy_input, use_ensemble],
             outputs=[band_gap_output, material_class_output, details_output]
+        )
+
+        # 设置批量预测功能
+        batch_predict_btn.click(
+            fn=lambda file, use_ensemble: batch_predict(file.name if file else None, use_ensemble),
+            inputs=[file_input, batch_use_ensemble],
+            outputs=[batch_results, batch_status]
+        ).then(
+            fn=lambda df: [gr.update(visible=True), None] if df is not None else [gr.update(visible=False), None],
+            inputs=[batch_results],
+            outputs=[batch_results_container, download_link]
+        )
+        
+        # 设置下载结果功能
+        download_btn.click(
+            fn=download_batch_results,
+            inputs=[batch_results],
+            outputs=[download_link]
+        ).then(
+            fn=lambda link: gr.update(visible=True, value=f"""
+                <a href="{link}" download="batch_prediction_results.csv" 
+                   style="display: block; text-align: center; padding: 10px; background-color: #f0f9ff; 
+                          border-radius: 5px; text-decoration: none; color: #2563eb; font-weight: 500;">
+                    ⬇️ 点击此处下载预测结果
+                </a>
+                """) if link else gr.update(visible=False),
+            inputs=[download_link],
+            outputs=[download_link]
+        )
+        
+        # 设置下载示例CSV功能
+        download_example_btn.click(
+            fn=get_example_csv,
+            inputs=[],
+            outputs=[example_download_link]
+        ).then(
+            fn=lambda link: gr.update(visible=True, value=link),
+            inputs=[example_download_link],
+            outputs=[example_download_link]
         )
 
         # 设置绘图函数
@@ -710,10 +1125,299 @@ def create_interface():
             outputs=[status_output]
         )
 
-    return demo
+        # 添加JavaScript代码，实现带隙指示器的动态更新
+        gr.HTML("""
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                // 监听预测结果变化
+                const bandGapOutput = document.getElementById('band-gap-output');
+                if (bandGapOutput) {
+                    const observer = new MutationObserver(function(mutations) {
+                        mutations.forEach(function(mutation) {
+                            if (mutation.type === 'childList' || mutation.type === 'characterData') {
+                                updateBandGapIndicator();
+                            }
+                        });
+                    });
+                    
+                    observer.observe(bandGapOutput, { 
+                        childList: true,
+                        characterData: true,
+                        subtree: true
+                    });
+                }
+                
+                // 更新带隙指示器位置和值
+                function updateBandGapIndicator() {
+                    const bandGapText = document.getElementById('band-gap-output').textContent;
+                    const bandGapMatch = bandGapText.match(/(\d+\.\d+)/);
+                    
+                    if (bandGapMatch && bandGapMatch[1]) {
+                        const bandGap = parseFloat(bandGapMatch[1]);
+                        const indicator = document.getElementById('band-gap-indicator');
+                        
+                        if (indicator) {
+                            // 计算指示器位置 (0-8 eV范围)
+                            const maxBandGap = 8.0;
+                            let position = (bandGap / maxBandGap) * 100;
+                            position = Math.min(Math.max(position, 0), 100);
+                            
+                            // 更新指示器位置和值
+                            indicator.style.left = position + '%';
+                            indicator.querySelector('div:last-child').textContent = bandGap.toFixed(2) + ' eV';
+                            
+                            // 显示指示器
+                            const visualizationRow = document.querySelector('.visualization-row');
+                            if (visualizationRow) {
+                                visualizationRow.style.display = 'block';
+                            }
+                        }
+                    }
+                }
+                
+                // 获取预测按钮
+                const predictBtn = document.getElementById('predict-btn');
+                const resultStatus = document.querySelector('#result-status');
+                
+                if (predictBtn && resultStatus) {
+                    // 点击预测按钮时显示加载状态
+                    predictBtn.addEventListener('click', function() {
+                        resultStatus.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div><p style="color: #666; margin-top: 10px;">正在预测中，请稍候...</p></div>';
+                    });
+                }
+                
+                // 获取绘图按钮
+                const plotBtn = document.getElementById('plot-btn');
+                const plotStatus = document.querySelector('#plot-status');
+                
+                if (plotBtn && plotStatus) {
+                    // 点击绘图按钮时显示加载状态
+                    plotBtn.addEventListener('click', function() {
+                        plotStatus.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div><p style="color: #666; margin-top: 10px;">正在生成拟合曲线，请稍候...</p></div>';
+                    });
+                }
+            });
+        </script>
+        """)
 
+        # 添加加载状态的JavaScript
+        gr.HTML("""
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                // 获取批量预测按钮
+                const batchPredictBtn = document.querySelector('button:contains("批量预测")');
+                const batchStatus = document.querySelector('[label="处理状态"]');
+                
+                setTimeout(function() {
+                    const allButtons = document.querySelectorAll('button');
+                    let batchBtn = null;
+                    
+                    for (let i = 0; i < allButtons.length; i++) {
+                        if (allButtons[i].textContent.includes('批量预测')) {
+                            batchBtn = allButtons[i];
+                            break;
+                        }
+                    }
+                    
+                    const statusElem = document.querySelector('[aria-label="处理状态"]');
+                    
+                    if (batchBtn && statusElem) {
+                        batchBtn.addEventListener('click', function() {
+                            statusElem.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div><p style="color: #666; margin-top: 10px;">正在处理批量预测，请稍候...</p></div>';
+                        });
+                    }
+                }, 1000);
+            });
+        </script>
+        """)
+        
+        # 添加覆盖样式，移除Radio和Checkbox样式和动画
+        gr.HTML("""
+        <style>
+            /* 删除Radio样式 */
+            .model-type-selector .gradio-radio,
+            .gradio-radio {
+                display: block !important;
+            }
+            
+            .model-type-selector .gradio-radio label,
+            .gradio-radio label {
+                display: inline !important;
+                align-items: normal !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                border: none !important;
+                background-color: transparent !important;
+                color: inherit !important;
+                font-weight: normal !important;
+                transition: none !important;
+                animation: none !important;
+                transform: none !important;
+                border-radius: 0 !important;
+                box-shadow: none !important;
+            }
+            
+            .model-type-selector .gradio-radio input:checked + label,
+            .gradio-radio input:checked + label {
+                background-color: transparent !important;
+                color: inherit !important;
+                border: none !important;
+                font-weight: normal !important;
+            }
+            
+            /* 删除Radio的动画效果 */
+            .gradio-radio * {
+                transition: none !important;
+                animation: none !important;
+                transform: none !important;
+            }
+            
+            /* 恢复原生Radio样式 */
+            .gradio-radio input[type="radio"] {
+                -webkit-appearance: radio !important;
+                -moz-appearance: radio !important;
+                appearance: radio !important;
+                opacity: 1 !important;
+                position: static !important;
+                width: auto !important;
+                height: auto !important;
+                margin-right: 5px !important;
+                display: inline-block !important;
+            }
+            
+            /* 删除Checkbox样式 */
+            .regenerate-checkbox,
+            .gradio-checkbox {
+                display: block !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+            
+            .regenerate-checkbox label,
+            .gradio-checkbox label {
+                display: inline !important;
+                align-items: normal !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                border: none !important;
+                background-color: transparent !important;
+                color: inherit !important;
+                font-weight: normal !important;
+                transition: none !important;
+                animation: none !important;
+                transform: none !important;
+                border-radius: 0 !important;
+                box-shadow: none !important;
+            }
+            
+            /* 删除Checkbox的动画效果 */
+            .gradio-checkbox * {
+                transition: none !important;
+                animation: none !important;
+                transform: none !important;
+            }
+            
+            /* 恢复原生Checkbox样式 */
+            .gradio-checkbox input[type="checkbox"] {
+                -webkit-appearance: checkbox !important;
+                -moz-appearance: checkbox !important;
+                appearance: checkbox !important;
+                opacity: 1 !important;
+                position: static !important;
+                width: auto !important;
+                height: auto !important;
+                margin-right: 5px !important;
+                display: inline-block !important;
+            }
+            
+            /* 删除所有控件的自定义样式 */
+            .model-type-selector, .regenerate-checkbox {
+                padding: 0 !important;
+                margin: 0 !important;
+                border: none !important;
+                background: none !important;
+                box-shadow: none !important;
+            }
+            
+            /* 页脚样式 - 确保居中显示在底部 */
+            #footer-container {
+                width: 100%;
+                text-align: center;
+                margin-bottom: 20px;
+            }
+            
+            .footer {
+                display: inline-block;
+                text-align: center;
+                max-width: 1200px;
+                width: 90%;
+                margin: 0 auto;
+            }
+            
+            /* 页眉样式 */
+            .header-container {
+                margin-bottom: 2rem;
+                padding: 1.5rem 0;
+                background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary-color) 100%);
+                border-radius: var(--radius);
+                box-shadow: var(--shadow);
+            }
+            
+            .header {
+                text-align: center;
+                width: 100%;
+            }
+            
+            .header h1 {
+                margin-bottom: 0.5rem;
+                color: white !important;
+                text-align: center;
+                text-shadow: 0 2px 4px rgba(150, 150, 150, 0.2);
+                font-size: 2.5rem !important;
+                font-weight: 700 !important;
+            }
+            
+            .subtitle {
+                color: rgba(10, 10, 10, 0.9) !important;
+                font-size: 1.1rem;
+                font-weight: 500;
+                margin-top: 0;
+            }
+        </style>
+        """)
+        
+        # 添加页脚到界面底部
+        gr.HTML("""
+        <div id="footer-container">
+            <div class="footer">
+                <div class="footer-content">
+                    <div class="footer-section">
+                        <h4>材料带隙预测系统</h4>
+                        <p>版本 1.1 | 基于深度学习的材料科学工具</p>
+                    </div>
+                    <div class="footer-section">
+                        <h4>关于</h4>
+                        <p>© 2025 张昊峥测试项目</p>
+                    </div>
+                    <div class="footer-section">
+                        <h4>联系方式</h4>
+                        <p>邮箱: 15855147102@163.com</p>
+                    </div>
+                </div>
+                <div class="footer-bottom">
+                    <p>使用深度学习算法预测无机材料的带隙值</p>
+                </div>
+            </div>
+        </div>
+        """)
+
+    # 返回Gradio界面实例
+    return demo
 
 # 启动Web界面
 if __name__ == "__main__":
     demo = create_interface()
+    
+    # 启动Gradio界面，不再使用不支持的footer参数
     demo.launch(share=False)
+
