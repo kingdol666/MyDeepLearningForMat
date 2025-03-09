@@ -617,6 +617,57 @@ def get_example_csv():
         print(f"生成示例CSV下载链接时出错: {str(e)}")
         return "<div style='color:red;'>生成示例文件失败</div>"
 
+# 添加一个函数来更新指示器
+def update_indicator(band_gap):
+    """更新带隙指示器
+    
+    Args:
+        band_gap: 预测的带隙值
+        
+    Returns:
+        HTML指示器代码
+    """
+    try:
+        if band_gap is None or not isinstance(band_gap, (int, float)):
+            # 提取数字
+            if isinstance(band_gap, str):
+                import re
+                match = re.search(r'(\d+\.\d+)', band_gap)
+                if match:
+                    band_gap = float(match.group(1))
+                else:
+                    return None
+            else:
+                return None
+        
+        # 确保带隙值是浮点数
+        band_gap = float(band_gap)
+        
+        # 计算位置百分比 (0-8 eV范围)
+        max_band_gap = 8.0
+        position = min(max((band_gap / max_band_gap) * 100, 0), 100)
+        
+        # 生成HTML
+        indicator_html = f"""
+        <div style="text-align: center; width: 100%;">
+            <div style="display: inline-block; width: 100%; max-width: 300px; height: 30px; background: linear-gradient(to right, #3498db, #2ecc71, #f1c40f, #e74c3c); border-radius: 15px; position: relative; margin-top: 10px;">
+                <div style="position: absolute; top: -10px; left: {position}%; transform: translateX(-50%);">
+                    <div style="width: 20px; height: 20px; background-color: #333; border-radius: 50%; border: 3px solid white;"></div>
+                    <div style="color: #333; font-weight: bold; margin-top: 5px;">{band_gap:.2f} eV</div>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 0 10px; margin-top: 35px; font-size: 0.8rem;">
+                    <span>金属</span>
+                    <span>半导体</span>
+                    <span>绝缘体</span>
+                </div>
+            </div>
+        </div>
+        """
+        return indicator_html
+    except Exception as e:
+        print(f"更新指示器错误: {str(e)}")
+        return None
+
 # 创建Gradio界面
 
 
@@ -699,7 +750,7 @@ def create_interface():
                             with gr.Accordion("元素周期表参考", open=False):
                                 gr.HTML("""
                                 <div style="text-align: center;">
-                                    <img src="https://sciencenotes.org/wp-content/uploads/2020/06/PeriodicTableCharge.png" 
+                                    <img src="https://upload.wikimedia.org/wikipedia/commons/4/44/%E5%85%83%E7%B4%A0%E5%91%A8%E6%9C%9F%E8%A1%A8.png" 
                                          alt="元素周期表" 
                                          style="max-width: 100%; border-radius: 8px; margin-top: 10px;">
                                     <p style="font-size: 0.8rem; color: #666; margin-top: 5px;">
@@ -713,14 +764,6 @@ def create_interface():
                         gr.Markdown("### 预测结果")
                         
                         with gr.Group(elem_classes=["result-card"]):
-                            # 添加结果状态指示器
-                            result_status = gr.HTML(
-                                """<div style="text-align: center; padding: 20px;">
-                                    <p style="color: #666;">点击"预测带隙"按钮获取结果</p>
-                                </div>""",
-                                elem_id="result-status"
-                            )
-                            
                             band_gap_output = gr.Textbox(
                                 label="预测带隙",
                                 elem_id="band-gap-output"
@@ -738,22 +781,12 @@ def create_interface():
                             )
                             
                             # 添加可视化指示器
-                            with gr.Row(visible=False, elem_classes=["visualization-row"]) as visualization_row:
-                                gr.HTML("""
-                                <div style="text-align: center; width: 100%;">
-                                    <div style="display: inline-block; width: 100%; max-width: 300px; height: 30px; background: linear-gradient(to right, #3498db, #2ecc71, #f1c40f, #e74c3c); border-radius: 15px; position: relative; margin-top: 10px;">
-                                        <div id="band-gap-indicator" style="position: absolute; top: -10px; left: 50%; transform: translateX(-50%);">
-                                            <div style="width: 20px; height: 20px; background-color: #333; border-radius: 50%; border: 3px solid white;"></div>
-                                            <div style="color: #333; font-weight: bold; margin-top: 5px;">2.5 eV</div>
-                                        </div>
-                                        <div style="display: flex; justify-content: space-between; padding: 0 10px; margin-top: 35px; font-size: 0.8rem;">
-                                            <span>金属</span>
-                                            <span>半导体</span>
-                                            <span>绝缘体</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                """)
+                            indicator_html = gr.HTML(
+                                """<div style="text-align: center; padding: 20px;">
+                                    <p style="color: #666;">预测完成后将显示带隙指示器</p>
+                                </div>""",
+                                elem_id="band-gap-visualization"
+                            )
 
                 # 样本数据
                 with gr.Row():
@@ -764,8 +797,8 @@ def create_interface():
                 gr.Examples(
                     examples=sample_data,
                     inputs=[elements_input, nelements_input, formation_energy_input],
-                    outputs=[band_gap_output, material_class_output, details_output],
-                    fn=lambda e, n, f: predict_material(e, n, f, False)
+                    outputs=[band_gap_output, material_class_output, details_output, indicator_html],
+                    fn=lambda e, n, f: predict_material(e, n, f, False) + (update_indicator(predict_material(e, n, f, False)[0]),)
                 )
 
             with gr.Tab("📊 批量预测"):
@@ -787,7 +820,7 @@ def create_interface():
                                 )
                                 
                                 batch_predict_btn = gr.Button(
-                                    "批量预测", 
+                                    "🔮 批量预测", 
                                     variant="primary",
                                     interactive=True
                                 )
@@ -825,7 +858,7 @@ def create_interface():
                         
                         | 列名 | 描述 | 示例 |
                         |------|------|------|
-                        | `elements` | 元素组成（用空格分隔，整体用引号包围） | `"Si O"` |
+                        | `elements` | 元素组成（用逗号分隔） | `Si,O` |
                         | `nelements` | 元素数量 | `2` |
                         | `formation_energy` | 形成能 (eV/atom) | `-3.0` |
                         
@@ -1063,12 +1096,16 @@ def create_interface():
                         - 单一模型支持
                         """)
 
-        # 设置提交函数 - 保持原功能不变
+        # 设置提交函数 - 修改为包含指示器更新
         predict_btn.click(
             fn=predict_material,
             inputs=[elements_input, nelements_input,
                     formation_energy_input, use_ensemble],
             outputs=[band_gap_output, material_class_output, details_output]
+        ).then(
+            fn=lambda band_gap: update_indicator(band_gap),
+            inputs=[band_gap_output],
+            outputs=[indicator_html]
         )
 
         # 设置批量预测功能
@@ -1129,34 +1166,36 @@ def create_interface():
         gr.HTML("""
         <script>
             document.addEventListener('DOMContentLoaded', function() {
-                // 监听预测结果变化
-                const bandGapOutput = document.getElementById('band-gap-output');
-                if (bandGapOutput) {
-                    const observer = new MutationObserver(function(mutations) {
-                        mutations.forEach(function(mutation) {
-                            if (mutation.type === 'childList' || mutation.type === 'characterData') {
-                                updateBandGapIndicator();
-                            }
-                        });
-                    });
-                    
-                    observer.observe(bandGapOutput, { 
-                        childList: true,
-                        characterData: true,
-                        subtree: true
-                    });
-                }
+                // 每隔一段时间检查并更新指示器
+                setInterval(function() {
+                    updateBandGapIndicator();
+                }, 500);
                 
                 // 更新带隙指示器位置和值
                 function updateBandGapIndicator() {
-                    const bandGapText = document.getElementById('band-gap-output').textContent;
+                    // 尝试不同的选择器方式找到元素
+                    const bandGapOutput = document.querySelector('[id="band-gap-output"] textarea') || 
+                                        document.querySelector('[id="band-gap-output"]') ||
+                                        document.querySelector('.gradio-textbox[id="band-gap-output"] textarea');
+                    
+                    if (!bandGapOutput) return;
+                    
+                    const bandGapText = bandGapOutput.value || bandGapOutput.textContent;
+                    if (!bandGapText) return;
+                    
                     const bandGapMatch = bandGapText.match(/(\d+\.\d+)/);
                     
                     if (bandGapMatch && bandGapMatch[1]) {
                         const bandGap = parseFloat(bandGapMatch[1]);
-                        const indicator = document.getElementById('band-gap-indicator');
+                        console.log("找到带隙值:", bandGap);
+                        
+                        // 尝试不同的选择器找到指示器
+                        const indicator = document.getElementById('band-gap-indicator') || 
+                                         document.querySelector('#band-gap-indicator') ||
+                                         document.querySelector('[id="band-gap-indicator"]');
                         
                         if (indicator) {
+                            console.log("找到指示器元素");
                             // 计算指示器位置 (0-8 eV范围)
                             const maxBandGap = 8.0;
                             let position = (bandGap / maxBandGap) * 100;
@@ -1164,25 +1203,37 @@ def create_interface():
                             
                             // 更新指示器位置和值
                             indicator.style.left = position + '%';
-                            indicator.querySelector('div:last-child').textContent = bandGap.toFixed(2) + ' eV';
+                            const valueElement = indicator.querySelector('div:last-child');
+                            if (valueElement) {
+                                valueElement.textContent = bandGap.toFixed(2) + ' eV';
+                                console.log("更新指示器值为:", bandGap.toFixed(2));
+                            }
                             
                             // 显示指示器
                             const visualizationRow = document.querySelector('.visualization-row');
                             if (visualizationRow) {
                                 visualizationRow.style.display = 'block';
+                                console.log("显示可视化行");
                             }
+                        } else {
+                            console.log("未找到指示器元素");
                         }
                     }
                 }
                 
                 // 获取预测按钮
                 const predictBtn = document.getElementById('predict-btn');
-                const resultStatus = document.querySelector('#result-status');
+                const resultStatus = document.querySelector('[id="result-status"]');
                 
                 if (predictBtn && resultStatus) {
                     // 点击预测按钮时显示加载状态
                     predictBtn.addEventListener('click', function() {
                         resultStatus.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div><p style="color: #666; margin-top: 10px;">正在预测中，请稍候...</p></div>';
+                        
+                        // 预测按钮点击后，等待一段时间再尝试更新指示器
+                        setTimeout(updateBandGapIndicator, 1000);
+                        setTimeout(updateBandGapIndicator, 2000);
+                        setTimeout(updateBandGapIndicator, 3000);
                     });
                 }
                 
@@ -1372,13 +1423,14 @@ def create_interface():
                 margin-bottom: 0.5rem;
                 color: white !important;
                 text-align: center;
-                text-shadow: 0 2px 4px rgba(150, 150, 150, 0.2);
+                color: rgba(136, 48, 48, 0.9) !important;
+                text-shadow: 0 2px 4px rgba(62, 179, 159, 0.2);
                 font-size: 2.5rem !important;
                 font-weight: 700 !important;
             }
             
             .subtitle {
-                color: rgba(10, 10, 10, 0.9) !important;
+                color: rgba(136, 48, 48, 0.9) !important;
                 font-size: 1.1rem;
                 font-weight: 500;
                 margin-top: 0;
@@ -1419,5 +1471,5 @@ if __name__ == "__main__":
     demo = create_interface()
     
     # 启动Gradio界面，不再使用不支持的footer参数
-    demo.launch(share=False)
+    demo.launch(share=True)
 
