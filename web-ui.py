@@ -1462,7 +1462,11 @@ def create_interface():
             </div>
         </div>
         """)
-
+        # 页面加载后自动点击（立即执行）
+        demo.load(
+            fn=plot_actual_vs_predicted,
+            js="document.getElementById('plot-btn').click()"
+        )
     # 返回Gradio界面实例
     return demo
 
